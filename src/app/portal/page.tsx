@@ -61,6 +61,7 @@ export default function PortalPage() {
   const [messages,      setMessages]      = useState<any[]>([])
   const [msgInput,      setMsgInput]      = useState('')
   const [sending,       setSending]       = useState(false)
+  const [chatError,     setChatError]     = useState('')
   const [editOpen,      setEditOpen]      = useState(false)
   const [editForm,      setEditForm]      = useState<Partial<Profile>>({})
   const [saving,        setSaving]        = useState(false)
@@ -77,18 +78,21 @@ export default function PortalPage() {
 
   async function fetchAll(userId: string) {
     if (!client) return
-    const [profileRes, achieveRes, progressRes, leaderRes, msgsRes] = await Promise.all([
-      client.from('profiles').select('*').eq('id', userId).single(),
+    const profileRes = await client.from('profiles').select('*').eq('id', userId).single()
+    const cohortId = profileRes.data?.cohort_id
+    if (profileRes.data) { setProfile(profileRes.data); setEditForm(profileRes.data) }
+
+    const [achieveRes, progressRes, leaderRes] = await Promise.all([
       client.from('achievements').select('achievement_id').eq('user_id', userId),
       client.from('lesson_progress').select('stage, completed').eq('user_id', userId),
       client.from('profiles').select('id, name, xp').order('xp', { ascending: false }).limit(10),
-      client.from('chat_messages')
+    ])
+    const msgsRes = cohortId ? await client.from('chat_messages')
         .select('*, profiles(name)')
         .eq('channel', 'general')
+        .eq('cohort_id', cohortId)
         .order('created_at', { ascending: true })
-        .limit(50),
-    ])
-    if (profileRes.data)  { setProfile(profileRes.data); setEditForm(profileRes.data) }
+        .limit(50) : { data: [] }
     if (achieveRes.data)  setEarnedIds(achieveRes.data.map((a: any) => a.achievement_id))
     if (progressRes.data) {
       const counts: Record<string, number> = {}
@@ -98,19 +102,24 @@ export default function PortalPage() {
       setStageProgress(counts)
     }
     if (leaderRes.data)  setLeaderboard(leaderRes.data)
-    if (msgsRes.data)    setMessages(msgsRes.data)
+    setMessages(msgsRes.data || [])
     setLoading(false)
   }
 
   // realtime chat
   useEffect(() => {
-    if (!client || !profile) return
+    if (!client || !profile?.cohort_id) return
+    const cohortId = profile.cohort_id
     const sub = client
-      .channel(`chat:${activeChannel}`)
+      .channel(`chat:${cohortId}:${activeChannel}`)
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public', table: 'chat_messages',
-        filter: `channel=eq.${activeChannel}`,
-      }, payload => setMessages(prev => [...prev, payload.new]))
+        filter: `cohort_id=eq.${cohortId}`,
+      }, payload => {
+        if (payload.new.cohort_id === cohortId && payload.new.channel === activeChannel) {
+          setMessages(prev => [...prev, payload.new])
+        }
+      })
       .subscribe()
     return () => { client.removeChannel(sub) }
   }, [activeChannel, profile])  // eslint-disable-line
@@ -120,25 +129,31 @@ export default function PortalPage() {
 
   async function switchChannel(ch: string) {
     setActiveChannel(ch)
-    if (!client) return
+    if (!client || !profile?.cohort_id) {
+      setMessages([])
+      return
+    }
     const { data } = await client
       .from('chat_messages')
       .select('*, profiles(name)')
       .eq('channel', ch)
+      .eq('cohort_id', profile.cohort_id)
       .order('created_at', { ascending: true })
       .limit(50)
-    if (data) setMessages(data)
+    setMessages(data || [])
   }
 
   async function sendMessage(e: React.FormEvent) {
     e.preventDefault()
-    if (!msgInput.trim() || !client || !profile) return
+    if (!msgInput.trim() || !client || !profile?.cohort_id) return
     setSending(true)
-    await client.from('chat_messages').insert({
-      user_id: profile.id, cohort_id: profile.cohort_id || 'cohort-01',
+    setChatError('')
+    const { error } = await client.from('chat_messages').insert({
+      user_id: profile.id, cohort_id: profile.cohort_id,
       channel: activeChannel, content: msgInput.trim(),
     })
-    setMsgInput('')
+    if (error) setChatError('Message could not be sent. Please try again.')
+    else setMsgInput('')
     setSending(false)
   }
 
@@ -386,7 +401,9 @@ export default function PortalPage() {
               {messages.length === 0 ? (
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center' }}>
                   <span style={{ fontSize: '12px', color: 'var(--ink-5)', fontFamily: 'var(--mono)', lineHeight: 1.7 }}>
-                    No messages yet.<br />Be the first to say hi.
+                    {!profile?.cohort_id
+                      ? <>Chat is available after you join a cohort.</>
+                      : <>No messages yet.<br />Be the first to say hi.</>}
                   </span>
                 </div>
               ) : messages.map((msg: any, i: number) => {
@@ -411,16 +428,18 @@ export default function PortalPage() {
             {/* Message input */}
             <form onSubmit={sendMessage} style={{ padding: '12px 16px', borderTop: '1px solid var(--line)', display: 'flex', gap: '8px' }}>
               <input type="text" value={msgInput} onChange={e => setMsgInput(e.target.value)}
-                placeholder={`#${activeChannel}`}
+                placeholder={profile?.cohort_id ? `#${activeChannel}` : 'Join a cohort to chat'}
+                disabled={!profile?.cohort_id || sending}
                 style={{ flex: 1, background: 'var(--bg-3)', border: '1px solid var(--line-2)', color: 'var(--ink)', padding: '8px 11px', borderRadius: '7px', fontSize: '12px', fontFamily: 'var(--sans)', outline: 'none', minHeight: '36px' }}
                 onFocus={e => e.target.style.borderColor = 'var(--gold)'}
                 onBlur={e => e.target.style.borderColor = 'var(--line-2)'}
               />
-              <button type="submit" disabled={sending || !msgInput.trim()}
-                style={{ width: '34px', height: '36px', background: 'var(--gold)', border: 'none', borderRadius: '7px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, opacity: sending || !msgInput.trim() ? 0.4 : 1 }}>
+              <button type="submit" disabled={!profile?.cohort_id || sending || !msgInput.trim()}
+                style={{ width: '34px', height: '36px', background: 'var(--gold)', border: 'none', borderRadius: '7px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, opacity: !profile?.cohort_id || sending || !msgInput.trim() ? 0.4 : 1 }}>
                 ↑
               </button>
             </form>
+            {chatError && <div role="alert" style={{ padding: '0 16px 12px', color: 'var(--red, #f87171)', fontSize: '11px' }}>{chatError}</div>}
           </aside>
         </div>
       </div>
