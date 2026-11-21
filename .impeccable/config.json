@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "layout-transition",
+        "value": "*",
+        "files": [
+          "src/app/portal/page.tsx"
+        ],
+        "createdAt": "2026-11-21T21:49:21.268Z",
+        "reason": "Agent triage: the existing XP and lesson progress indicators intentionally animate changing completion percentages; their dynamic widths and 0.6s transition show the intended behavior, and git blame confirms they predate this branch."
+      }
+    ]
+  }
+}
